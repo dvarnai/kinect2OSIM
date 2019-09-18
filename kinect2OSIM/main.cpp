@@ -1,6 +1,12 @@
 #include <stdio.h>
 #include <chrono>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <fstream>
+#include <iomanip>
 #include <Windows.h>
+#include <shobjidl.h> 
 #include <Ole2.h>
 
 #include <gl/GL.h>
@@ -26,11 +32,157 @@ IKinectSensor* sensor;         // Kinect sensor
 IMultiSourceFrameReader* reader;     
 ICoordinateMapper* mapper;
 
+const char* labels[] = {
+	"SpineBase",
+	"SpineMid",
+	"Neck",
+	"Head",
+	"ShoulderLeft",
+	"ElbowLeft",
+	"WristLeft",
+	"HandLeft",
+	"ShoulderRight",
+	"ElbowRight",
+	"WristRight",
+	"HandRight",
+	"HipLeft",
+	"KneeLeft",
+	"AnkleLeft",
+	"FootLeft",
+	"HipRight",
+	"KneeRight",
+	"AnkleRight",
+	"FootRight",
+	"SpineShoulder",
+	"HandTipLeft",
+	"ThumbLeft",
+	"HandTipRight",
+	"ThumbRight",
+	NULL
+};
+
 bool isRecording = false;
+std::vector<CameraSpacePoint*> frames;
 
 INT64 getNowMs() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>
 		(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+HRESULT showFileSaveDialog(wchar_t* outFilePath, size_t len)
+{
+	HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED |
+		COINIT_DISABLE_OLE1DDE);
+	COMDLG_FILTERSPEC fileTypes[] =
+	{
+		{L"Marker Files", L"*.trc"},
+	};
+	if (SUCCEEDED(hr))
+	{
+		IFileOpenDialog* pfd;
+		hr = CoCreateInstance(CLSID_FileSaveDialog, NULL, CLSCTX_ALL,
+			IID_IFileSaveDialog, reinterpret_cast<void**>(&pfd));
+
+		if (SUCCEEDED(hr))
+		{
+			hr = pfd->SetFileTypes(1, fileTypes);
+			if (SUCCEEDED(hr))
+			{
+				hr = pfd->SetDefaultExtension(L"trc");
+				if (SUCCEEDED(hr))
+				{
+					hr = pfd->Show(NULL);
+					if (SUCCEEDED(hr))
+					{
+						IShellItem* pItem;
+						hr = pfd->GetResult(&pItem);
+						if (SUCCEEDED(hr))
+						{
+							PWSTR pszFilePath;
+							hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
+
+							if (SUCCEEDED(hr))
+							{
+								wcsncpy_s(outFilePath, len, pszFilePath, len);
+								CoTaskMemFree(pszFilePath);
+							}
+							pItem->Release();
+						}
+					}
+				}
+			}
+			pfd->Release();
+		}
+		CoUninitialize();
+	}
+	return hr;
+}
+
+// Save motion frame for recording
+void saveMotionFrame() {
+	CameraSpacePoint* current = new CameraSpacePoint[JointType_Count];
+	for (unsigned int i = 0; i < JointType_Count; ++i) {
+		current[i] = joints[i].Position;
+	}
+	frames.push_back(current);
+}
+
+void releaseFrames() {
+	for (auto frame : frames) {
+		delete frame;
+	}
+	frames.clear();
+}
+
+void saveRecording() {
+	
+	// Show file dialog
+	wchar_t path[MAX_PATH];
+	showFileSaveDialog(path, sizeof(path));
+
+	// Open file
+	std::ofstream out(path);
+	if (!out) {
+		std::wostringstream text;
+		text <<  "Failed to save recording to " << path;
+		MessageBoxW(NULL, text.str().c_str(), L"Error saving file", MB_OK);
+	}
+
+	// Save trc format
+	out << "PathFileType\t4\t(X/Y/Z)\toutput.trc\n";
+	out << "DataRate\tCameraRate\tNumFrames\tNumMarkers\tUnits\tOrigDataRate\tOrigDataStartFrame\tOrigNumFrames\n";
+	out << "30\t30\t" << frames.size() << "\t" << JointType_Count << "\tmm\t30\t0\t" << frames.size() << "\n";
+	out << "Frame#\tTime";
+
+	// Write labels
+	unsigned int i = 0;
+	while (labels[i++] != NULL) {
+		out << "\t\t\t" << labels[i];
+	}
+	// Write unknown labels if there are more (shouldn't happen)
+	for (; i < JointType_Count; ++i) {
+		out << "\t\t\tunkJoint" << i;
+	}
+	out << "\n";
+
+	// Write XYZ
+	out << "\t";
+	for (i = 1; i <= JointType_Count; ++i) {
+		out << "\tX" << i << "\tY" << i << "\tZ" << i;
+	}
+	out << "\n";
+
+	// Write data
+	out << std::setprecision(5);
+	for (i = 0; i < frames.size(); ++i) {
+		out << i << "\t" << i * (1 / 30);
+		for (auto j = 0; j < JointType_Count; ++j) {
+			out << "\t" << frames[i][j].X << "\t" << frames[i][j].Y << "\t" << frames[i][j].Z;
+		}
+	}
+
+	out.close();
+	releaseFrames();
 }
 
 // Initialise kinect for colour and skeleton data
@@ -112,6 +264,11 @@ void getSkeletonData(IMultiSourceFrame* frame) {
 		if (bodyIdx != -1) {
 			body[bodyIdx]->GetJoints(JointType_Count, joints);
 			lastJoints = getNowMs();
+
+			// Save skeleton data if recording
+			if (isRecording) {
+				saveMotionFrame();
+			}
 		}
 	}
 
@@ -172,12 +329,16 @@ void drawSkeletonData() {
 		glLineWidth(5.0);
 		glBegin(GL_LINES);
 
+		drawLimb(JointType_HandRight, JointType_HandTipRight);
 		drawLimb(JointType_HandRight, JointType_WristRight);
+		drawLimb(JointType_ThumbRight, JointType_WristRight);
 		drawLimb(JointType_WristRight, JointType_ElbowRight);
 		drawLimb(JointType_ElbowRight, JointType_ShoulderRight);
 		drawLimb(JointType_ShoulderRight, JointType_Neck);
 
+		drawLimb(JointType_HandLeft, JointType_HandTipLeft);
 		drawLimb(JointType_HandLeft, JointType_WristLeft);
+		drawLimb(JointType_ThumbLeft, JointType_WristLeft);
 		drawLimb(JointType_WristLeft, JointType_ElbowLeft);
 		drawLimb(JointType_ElbowLeft, JointType_ShoulderLeft);
 		drawLimb(JointType_ShoulderLeft, JointType_Neck);
@@ -241,7 +402,9 @@ void draw() {
 	
 	// Draw recording status
 	if (isRecording) {
-		RenderString(20, 20, GLUT_BITMAP_HELVETICA_18, "Recording, press SPACE to stop...", GL_COLOR_RED);
+		std::ostringstream text;
+		text << "Recording " << frames.size() << " frames, press SPACE to save...";
+		RenderString(20, 20, GLUT_BITMAP_HELVETICA_18, text.str().c_str(), GL_COLOR_RED);
 	}
 
 	glutSwapBuffers();
@@ -265,10 +428,14 @@ void handleKeys(unsigned char key, int x, int y) {
 	
 	if (key == ' ') {
 		isRecording = !isRecording;
+		if (isRecording == false && frames.size() > 0) {
+			saveRecording();
+		}
 	}
 }
 
 int main(int argc, char* argv[]) {
+
 	if (!init(argc, argv)) return 1;
 	if (!initKinect()) return 1;
 
