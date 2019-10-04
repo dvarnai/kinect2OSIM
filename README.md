@@ -15,7 +15,7 @@ https://www.transmissionzero.co.uk/software/freeglut-devel/
 # Usage
 
 Upon running the application, it should automatically find your Kinect and show you a viewer displaying the video
-stream of the camera overlayed by the tracked skeleton.
+stream of the camera overlayed by the tracked skeleton. Only one skeleton is tracked at a time.
 
 To start/stop recording, just hit the SPACE button.
 
